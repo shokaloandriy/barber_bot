@@ -4,12 +4,9 @@ from datetime import date, timedelta
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
-from cb import ApptCB, ClientCB, DayCB, MyCB, SaleCB, SchedCB
+from cb import ApptCB, ClientCB, DayCB, MyCB, SaleCB, WeekCB
 from utils import (EMOJI, STATUS_TXT, WD_FULL, appt_line, btn, client, client_stats, d2k, day_appts,
-                   day_hours, e, fdate, monday, money, rel_day, sales_of, sdt, today)
-
-# готові варіанти годин на екрані дня в графіку
-HOUR_PRESETS = ["09:00-18:00", "10:00-19:00", "10:00-20:00", "11:00-20:00", "12:00-21:00", "10:00-15:00"]
+                   day_hours, e, fdate, money, rel_day, sales_of, sdt, today)
 
 
 def kb_confirm(aid: int):
@@ -38,10 +35,9 @@ def _short(name: str | None, n: int = 12) -> str:
     return name if len(name) <= n else name[: n - 1] + "…"
 
 
-async def appt_money(a) -> tuple[int, int, int]:
-    """(послуга, допродаж, чайові)"""
+async def appt_money(a) -> tuple[int, int]:
     sales = await sales_of(a["id"])
-    return a["price"] or 0, sum(s["price"] for s in sales), a["tips"] or 0
+    return a["price"] or 0, sum(s["price"] for s in sales)
 
 
 # ---------- день / тиждень ----------
@@ -52,7 +48,7 @@ async def render_day(d: date):
     head = f"📅 <b>{WD_FULL[d.weekday()]}, {d:%d.%m}</b>"
     if d == today():
         head += " · сьогодні"
-    lines = [head, f"🕘 {hours[0]:%H:%M}–{hours[1]:%H:%M}" if hours else "💤 Вихідний — клієнти не можуть записатись", ""]
+    lines = [head, f"🕘 {hours[0]:%H:%M}–{hours[1]:%H:%M}" if hours else "💤 Вихідний", ""]
     kb = InlineKeyboardBuilder()
     fact = plan = clients = 0
     for a in appts:
@@ -65,7 +61,8 @@ async def render_day(d: date):
         kb.button(text=f"{EMOJI[a['status']]} {s:%H:%M} {_short(a['cname'])}",
                   callback_data=ApptCB(a="v", id=a["id"]))
         if a["status"] == "done":
-            fact += sum(await appt_money(a))
+            p, sl = await appt_money(a)
+            fact += p + sl
             clients += 1
         elif a["status"] in ("pending", "confirmed"):
             plan += a["sprice"] or 0
@@ -85,59 +82,27 @@ async def render_day(d: date):
         btn("▶️", DayCB(a="v", day=d2k(d + timedelta(days=1)))),
     )
     kb.row(btn("➕ Запис", DayCB(a="add", day=d2k(d))), btn("🔒 Блок часу", DayCB(a="blk", day=d2k(d))))
-    kb.row(btn("⏰ Години цього дня", SchedCB(a="d", day=d2k(d))))
     return "\n".join(lines), kb.as_markup()
 
 
-# ---------- графік роботи ----------
-
-def _hrs(hours) -> str:
-    return f"{hours[0]:%H:%M}–{hours[1]:%H:%M}" if hours else "вихідний"
-
-
-async def render_sched(start: date):
-    """Тиждень графіка: кожен день — кнопка, тап відкриває вибір годин."""
-    start = monday(start)
-    lines = [
-        f"🗓 <b>Графік роботи · {start:%d.%m} – {start + timedelta(days=6):%d.%m}</b>", "",
-        "Клієнти бачать лише дні, які ти відкрив ✅.",
-        "Тапни день, щоб поставити години або зробити вихідним.",
-    ]
+async def render_week(start: date):
+    lines = [f"🗓 <b>{start:%d.%m} – {start + timedelta(days=6):%d.%m}</b>", ""]
     kb = InlineKeyboardBuilder()
     for i in range(7):
         d = start + timedelta(days=i)
         hours = await day_hours(d)
-        n = sum(1 for a in await day_appts(d) if a["status"] in ("pending", "confirmed", "done"))
-        label = f"{'✅' if hours else '▫️'} {fdate(d)} · {_hrs(hours)}"
-        if n:
-            label += f" · {n} зап."
-        if d == today():
-            label = "👉 " + label
-        kb.row(btn(label, SchedCB(a="d", day=d2k(d))))
-    kb.row(btn("◀️ Тиждень", SchedCB(a="wk", day=d2k(start - timedelta(days=7)))),
-           btn("Тиждень ▶️", SchedCB(a="wk", day=d2k(start + timedelta(days=7)))))
-    kb.row(btn("🔁 Як минулого тижня", SchedCB(a="copy", day=d2k(start))))
-    return "\n".join(lines), kb.as_markup()
-
-
-async def render_sched_day(d: date):
-    hours = await day_hours(d)
-    appts = [a for a in await day_appts(d) if a["status"] in ("pending", "confirmed")]
-    lines = [f"🗓 <b>{WD_FULL[d.weekday()]}, {d:%d.%m}</b>",
-             f"Зараз: {'✅ ' + _hrs(hours) if hours else '▫️ вихідний'}"]
-    if appts:
-        lines += ["", "Записи:"] + [f"• {sdt(a['start_at']):%H:%M} {e(a['cname'])}" for a in appts]
-    lines += ["", "Обери години роботи або напиши свої:"]
-    current = _hrs(hours).replace("–", "-")
-    kb = InlineKeyboardBuilder()
-    for p in HOUR_PRESETS:
-        kb.button(text=("• " if p == current else "") + p.replace("-", "–"),
-                  callback_data=SchedCB(a="set", day=d2k(d), v=p.replace(":", "")))
-    kb.adjust(2)
-    kb.row(btn("✍️ Свої години", SchedCB(a="cus", day=d2k(d))),
-           btn("▫️ Вихідний", SchedCB(a="set", day=d2k(d), v="off")))
-    kb.row(btn("📅 Записи дня", DayCB(a="v", day=d2k(d))),
-           btn("⬅️ До графіка", SchedCB(a="wk", day=d2k(d))))
+        appts = [a for a in await day_appts(d) if a["status"] != "block"]
+        pending = sum(1 for a in appts if a["status"] == "pending")
+        mark = "👉 " if d == today() else ""
+        hrs = f"{hours[0]:%H:%M}–{hours[1]:%H:%M}" if hours else "вихідний"
+        line = f"{mark}<b>{fdate(d)}</b> · {hrs} · записів: {len(appts)}"
+        if pending:
+            line += f" (⏳ {pending})"
+        lines.append(line)
+        kb.button(text=fdate(d), callback_data=DayCB(a="v", day=d2k(d)))
+    kb.adjust(4)
+    kb.row(btn("◀️ Тиждень", WeekCB(day=d2k(start - timedelta(days=7)))),
+           btn("Тиждень ▶️", WeekCB(day=d2k(start + timedelta(days=7)))))
     return "\n".join(lines), kb.as_markup()
 
 
@@ -173,7 +138,15 @@ async def render_appt(a):
     lines.append(f"Статус: <b>{STATUS_TXT[a['status']]}</b>{src}")
 
     if a["status"] == "done":
-        lines += [""] + await money_lines(a)
+        price, _ = await appt_money(a)
+        sales = await sales_of(aid)
+        lines.append("")
+        lines.append(f"💵 Послуга: {money(price)}")
+        if sales:
+            lines.append("🛍 Допродаж: " + ", ".join(f"{e(x['item_name'])} {x['price']}" for x in sales))
+        else:
+            lines.append("🛍 Допродажу не було")
+        lines.append(f"<b>Разом: {money(price + sum(x['price'] for x in sales))}</b>")
 
     st = a["status"]
     if st == "pending":
@@ -183,7 +156,7 @@ async def render_appt(a):
         kb.row(btn("🔁 Перенести", ApptCB(a="rs", id=aid)), btn("🚫 Не прийшов", ApptCB(a="ns", id=aid)))
         kb.row(btn("❌ Скасувати запис", ApptCB(a="cx", id=aid)))
     if st == "done":
-        kb.row(btn("✏️ Виправити суми", ApptCB(a="done", id=aid)))
+        kb.row(btn("🛍 Допродаж", ApptCB(a="ups", id=aid)))
     if a["client_id"]:
         kb.row(btn("👤 Клієнт", ClientCB(a="v", id=a["client_id"])),
                btn("⬅️ До дня", DayCB(a="v", day=d2k(s.date()))))
@@ -192,56 +165,28 @@ async def render_appt(a):
     return "\n".join(lines), kb.as_markup()
 
 
-# ---------- закриття візиту: послуга → допродаж → чайові ----------
+# ---------- допродаж ----------
 
-async def money_lines(a) -> list[str]:
-    price, ups, tips = await appt_money(a)
-    sales = await sales_of(a["id"])
-    return [
-        f"✂️ Послуга: {money(price)}",
-        "🛍 Допродаж: " + (", ".join(f"{e(x['item_name'])} {x['price']}" for x in sales) if sales else "—"),
-        f"💸 Чайові: {money(tips) if tips else '—'}",
-        f"<b>Разом: {money(price + ups + tips)}</b>",
-    ]
-
-
-async def render_close_price(a):
-    kb = InlineKeyboardBuilder()
-    kb.row(btn(f"✅ {money(a['sprice'])}", SaleCB(a="price", ap=a["id"], it=a["sprice"] or 0)))
-    kb.row(btn("✖️ Скасувати", "x"))
-    text = (f"💈 <b>Закриваємо візит</b> · {e(a['cname'])}\n✂️ {e(a['sname'])}\n\n"
-            "<b>Крок 1 з 3.</b> Скільки взяв за послугу?\nНатисни кнопку або напиши суму числом.")
-    return text, kb.as_markup()
-
-
-async def render_close_ups(a):
+async def render_upsell(a):
     aid = a["id"]
+    price, _ = await appt_money(a)
     sales = await sales_of(aid)
-    lines = [f"💈 <b>Закриваємо візит</b> · {e(a['cname'])}", "",
-             "<b>Крок 2 з 3.</b> Що допродав?",
-             "Тапни кнопку або напиши текстом, наприклад: <code>укладка 600</code>"]
+    lines = [f"🛍 <b>Допродаж</b> · {e(a['cname'])}", f"💵 Послуга: {money(price)}", ""]
     if sales:
-        lines += ["", "Додано:"] + [f"• {e(x['item_name'])} — {money(x['price'])}" for x in sales]
+        lines.append("Додано:")
+        lines += [f" • {e(x['item_name'])} — {money(x['price'])}" for x in sales]
+    else:
+        lines.append("Поки нічого не додано.")
+    total = price + sum(x["price"] for x in sales)
+    lines += ["", f"<b>Разом за візит: {money(total)}</b>", "",
+              "Тапни товар, щоб додати (повторний тап = ще одна штука)."]
     kb = InlineKeyboardBuilder()
-    for it in await db.q("SELECT * FROM upsell_items WHERE active = 1 ORDER BY id"):
-        kb.button(text=f"+ {it['name']} · {it['price']}", callback_data=SaleCB(a="add", ap=aid, it=it["id"]))
+    for it in await db.q("SELECT * FROM upsell_items WHERE active = 1 ORDER BY name"):
+        kb.button(text=f"{it['name']} · {it['price']}", callback_data=SaleCB(a="add", ap=aid, it=it["id"]))
     kb.adjust(2)
-    if sales:
-        kb.row(btn("↩️ Прибрати останнє", SaleCB(a="undo", ap=aid)))
-    kb.row(btn("Далі ➡️" if sales else "Без допродажу ➡️", SaleCB(a="next", ap=aid)))
+    kb.row(btn("✍️ Інше", SaleCB(a="cus", ap=aid)), btn("↩️ Прибрати останнє", SaleCB(a="undo", ap=aid)))
+    kb.row(btn("✅ Готово", SaleCB(a="fin", ap=aid)))
     return "\n".join(lines), kb.as_markup()
-
-
-async def render_close_tips(a):
-    aid = a["id"]
-    kb = InlineKeyboardBuilder()
-    kb.row(btn("Не було", SaleCB(a="tip", ap=aid, it=0)))
-    for v in (50, 100, 200):
-        kb.button(text=f"{v} грн", callback_data=SaleCB(a="tip", ap=aid, it=v))
-    kb.adjust(1, 3)
-    text = (f"💈 <b>Закриваємо візит</b> · {e(a['cname'])}\n\n"
-            "<b>Крок 3 з 3.</b> Чайові були?\nНатисни кнопку або напиши суму числом.")
-    return text, kb.as_markup()
 
 
 # ---------- картка клієнта ----------
@@ -251,7 +196,7 @@ async def render_client(cid: int):
     if not c:
         return "Клієнта не знайдено.", None
     st = await client_stats(cid)
-    default = await db.get_int("default_remind_days", 28)
+    default = await db.get_int("default_remind_days", 21)
     lines = [f"👤 <b>{e(c['name'])}</b>"]
     contact = [c["phone"] or "без телефону"]
     if c["username"]:

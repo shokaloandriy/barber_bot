@@ -78,8 +78,7 @@ async def history(cb: CallbackQuery, callback_data: ClientCB):
         extra = ""
         if a["status"] == "done":
             up = await db.q1("SELECT COALESCE(SUM(price), 0) v FROM sales WHERE appointment_id = ?", a["id"])
-            extra = f" · {money((a['price'] or 0) + up['v'] + (a['tips'] or 0))}" \
-                + (f" (🛍 {up['v']})" if up["v"] else "") + (f" (💸 {a['tips']})" if a["tips"] else "")
+            extra = f" · {money((a['price'] or 0) + up['v'])}" + (f" (🛍 {up['v']})" if up["v"] else "")
         lines.append(f"{EMOJI[a['status']]} {s:%d.%m.%y %H:%M} · {e(a['sname'])}{extra}")
         kb.button(text=f"{s:%d.%m} {EMOJI[a['status']]}", callback_data=ApptCB(a="v", id=a["id"]))
     if not rows:

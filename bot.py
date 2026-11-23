@@ -11,11 +11,13 @@ import db
 import scheduler
 from config import ADMIN_IDS, BOT_TOKEN
 from handlers import admin_book, admin_clients, admin_finance, admin_schedule, admin_settings, booking, client, common
+from middlewares import PhoneRequired
 
 
 def build_dispatcher() -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_routers(
+        client.reg_router,      # введення номера телефону — найвищий пріоритет у своєму стані
         common.router,          # /start, меню, скасування — мають пріоритет над станами
         booking.router,         # спільний вибір послуги/дати/часу
         admin_book.router,
@@ -26,6 +28,9 @@ def build_dispatcher() -> Dispatcher:
         client.router,
         common.fallback,        # завжди останній
     )
+    # клієнт без номера телефону не користується ботом, поки не надасть номер
+    dp.message.outer_middleware(PhoneRequired())
+    dp.callback_query.outer_middleware(PhoneRequired())
     return dp
 
 

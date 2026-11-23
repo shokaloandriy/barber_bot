@@ -1,6 +1,6 @@
-"""Барбер: графік роботи, день, дії із записом, закриття візиту (послуга → допродаж → чайові), блок часу."""
+"""Барбер: графік дня/тижня, дії із записом, закриття візиту з допродажем, блокування часу."""
 import re
-from datetime import datetime, time, timedelta
+from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
@@ -8,12 +8,11 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
-from cb import ApptCB, BlockSt, DayCB, Done, SaleCB, SchedCB, SchedSt
+from cb import ApptCB, BlockSt, DayCB, Done, SaleCB, WeekCB
 from handlers import admin_book, booking
-from utils import (IsAdmin, appt, btn, day_hours, dts, e, fdate, find_overlap, k2d, now, parse_range,
-                   parse_range_note, remind_flags, safe_edit, sdt, send_client, set_day_hours, to_int, today)
-from views import (kb_book_again, kb_client_appt, render_appt, render_close_price, render_close_tips,
-                   render_close_ups, render_day, render_sched, render_sched_day)
+from utils import (IsAdmin, appt, btn, dts, e, fdate, find_overlap, k2d, money, now, parse_range_note,
+                   remind_flags, safe_edit, sdt, send_client, to_int, today)
+from views import kb_book_again, kb_client_appt, render_appt, render_day, render_upsell, render_week
 
 router = Router()
 router.message.filter(IsAdmin())
@@ -25,8 +24,9 @@ async def send_day(m: Message, d) -> None:
     await m.answer(text, reply_markup=kb)
 
 
-async def send_sched(m: Message) -> None:
-    text, kb = await render_sched(today())
+async def send_week(m: Message) -> None:
+    t = today()
+    text, kb = await render_week(t)
     await m.answer(text, reply_markup=kb)
 
 
@@ -38,80 +38,11 @@ async def day_view(cb: CallbackQuery, callback_data: DayCB, state: FSMContext):
     await cb.answer()
 
 
-# ---------- графік роботи ----------
-
-def _warn(appts) -> str:
-    if not appts:
-        return ""
-    rows = "\n".join(f"• {fdate(sdt(a['start_at']).date())} {sdt(a['start_at']):%H:%M} — {e(a['cname'])}"
-                     for a in appts)
-    return f"⚠️ <b>Ці записи випадають за години роботи — перенеси або скасуй їх:</b>\n{rows}\n\n"
-
-
-@router.callback_query(SchedCB.filter(F.a == "wk"))
-async def sched_week(cb: CallbackQuery, callback_data: SchedCB, state: FSMContext):
-    await state.clear()
-    text, kb = await render_sched(k2d(callback_data.day))
+@router.callback_query(WeekCB.filter())
+async def week_view(cb: CallbackQuery, callback_data: WeekCB):
+    text, kb = await render_week(k2d(callback_data.day))
     await safe_edit(cb.message, text, kb)
     await cb.answer()
-
-
-@router.callback_query(SchedCB.filter(F.a == "d"))
-async def sched_day(cb: CallbackQuery, callback_data: SchedCB, state: FSMContext):
-    await state.clear()
-    text, kb = await render_sched_day(k2d(callback_data.day))
-    await safe_edit(cb.message, text, kb)
-    await cb.answer()
-
-
-@router.callback_query(SchedCB.filter(F.a == "set"))
-async def sched_set(cb: CallbackQuery, callback_data: SchedCB):
-    d = k2d(callback_data.day)
-    v = callback_data.v
-    rng = None if v == "off" else (time(int(v[:2]), int(v[2:4])), time(int(v[5:7]), int(v[7:9])))
-    warn = await set_day_hours(d, rng)
-    text, kb = await render_sched(d)
-    await safe_edit(cb.message, _warn(warn) + text, kb)
-    await cb.answer(f"{fdate(d)}: " + (f"{rng[0]:%H:%M}–{rng[1]:%H:%M}" if rng else "вихідний"))
-
-
-@router.callback_query(SchedCB.filter(F.a == "cus"))
-async def sched_custom(cb: CallbackQuery, callback_data: SchedCB, state: FSMContext):
-    await state.clear()
-    await state.set_state(SchedSt.custom)
-    await state.update_data(day=callback_data.day)
-    kb = InlineKeyboardBuilder()
-    kb.row(btn("✖️ Скасувати", SchedCB(a="d", day=callback_data.day)))
-    await safe_edit(cb.message, f"✍️ Години на <b>{fdate(k2d(callback_data.day))}</b>, наприклад "
-                                "<code>10-19</code> або <code>09:30-18:00</code>", kb.as_markup())
-    await cb.answer()
-
-
-@router.message(SchedSt.custom, F.text)
-async def sched_custom_input(m: Message, state: FSMContext):
-    rng = parse_range(m.text)
-    if not rng:
-        await m.answer("Не зрозумів. Напиши так: <code>10-19</code> або <code>09:30-18:00</code>")
-        return
-    d = k2d((await state.get_data())["day"])
-    await state.clear()
-    warn = await set_day_hours(d, rng)
-    text, kb = await render_sched(d)
-    await m.answer(f"✅ {fdate(d)}: {rng[0]:%H:%M}–{rng[1]:%H:%M}\n\n" + _warn(warn) + text, reply_markup=kb)
-
-
-@router.callback_query(SchedCB.filter(F.a == "copy"))
-async def sched_copy(cb: CallbackQuery, callback_data: SchedCB):
-    start = k2d(callback_data.day)
-    warn = []
-    for i in range(7):
-        d = start + timedelta(days=i)
-        if d < today():
-            continue
-        warn += await set_day_hours(d, await day_hours(d - timedelta(days=7)))
-    text, kb = await render_sched(start)
-    await safe_edit(cb.message, _warn(warn) + text, kb)
-    await cb.answer("Скопійовано з минулого тижня")
 
 
 @router.callback_query(DayCB.filter(F.a == "add"))
@@ -277,114 +208,112 @@ async def appt_resched(cb: CallbackQuery, callback_data: ApptCB, state: FSMConte
         await cb.answer()
 
 
-# ---------- закриття візиту: 1) послуга 2) допродаж 3) чайові ----------
-# Кнопки кроків несуть id запису, тому працюють і після перезапуску бота; текстовий ввід — через стан.
+# ---------- закриття візиту ----------
 
-_STEPS = {Done.price: render_close_price, Done.ups: render_close_ups, Done.tips: render_close_tips}
-
-
-async def _step(msg: Message, state: FSMContext, aid: int, st, edit: bool) -> None:
+@router.callback_query(ApptCB.filter(F.a == "done"))
+async def appt_done(cb: CallbackQuery, callback_data: ApptCB, state: FSMContext):
+    a = await _load(cb, callback_data.id)
+    if not a:
+        return
     await state.clear()
-    await state.set_state(st)
-    await state.update_data(appt_id=aid)
-    text, kb = await _STEPS[st](await appt(aid))
+    await state.set_state(Done.price)
+    await state.update_data(appt_id=a["id"], sprice=a["sprice"] or 0)
+    kb = InlineKeyboardBuilder()
+    kb.row(btn(f"✅ {money(a['sprice'])}", "dp_ok"))
+    kb.row(btn("✖️ Скасувати", "x"))
+    await cb.message.answer(
+        f"💈 Закриваємо візит: <b>{e(a['cname'])}</b>, {e(a['sname'])}\n\n"
+        "Скільки взяв за послугу? Натисни кнопку або введи іншу суму числом.",
+        reply_markup=kb.as_markup(),
+    )
+    await cb.answer()
+
+
+async def _close_visit(msg: Message, state: FSMContext, price: int, edit: bool) -> None:
+    aid = (await state.get_data())["appt_id"]
+    await db.ex("UPDATE appointments SET status = 'done', price = ?, completed_at = ? WHERE id = ?",
+                price, dts(now()), aid)
+    await state.clear()
+    text, kb = await render_upsell(await appt(aid))
     if edit:
         await safe_edit(msg, text, kb)
     else:
         await msg.answer(text, reply_markup=kb)
 
 
-@router.callback_query(ApptCB.filter(F.a == "done"))
-async def appt_done(cb: CallbackQuery, callback_data: ApptCB, state: FSMContext):
-    if await _load(cb, callback_data.id):
-        await _step(cb.message, state, callback_data.id, Done.price, edit=True)
-        await cb.answer()
-
-
-async def _set_price(msg: Message, state: FSMContext, aid: int, price: int, edit: bool) -> None:
-    await db.ex("UPDATE appointments SET status = 'done', price = ?, completed_at = COALESCE(completed_at, ?) "
-                "WHERE id = ?", price, dts(now()), aid)
-    await _step(msg, state, aid, Done.ups, edit)
-
-
-@router.callback_query(SaleCB.filter(F.a == "price"))
-async def close_price_btn(cb: CallbackQuery, callback_data: SaleCB, state: FSMContext):
-    await _set_price(cb.message, state, callback_data.ap, callback_data.it, edit=True)
+@router.callback_query(Done.price, F.data == "dp_ok")
+async def done_default_price(cb: CallbackQuery, state: FSMContext):
+    await _close_visit(cb.message, state, (await state.get_data())["sprice"], edit=True)
     await cb.answer()
 
 
 @router.message(Done.price, F.text)
-async def close_price_text(m: Message, state: FSMContext):
+async def done_custom_price(m: Message, state: FSMContext):
     price = to_int(m.text)
     if price is None:
-        await m.answer("Напиши суму числом, наприклад 700")
+        await m.answer("Введи суму числом, наприклад 450")
         return
-    await _set_price(m, state, (await state.get_data())["appt_id"], price, edit=False)
+    await _close_visit(m, state, price, edit=False)
 
 
-async def _add_sale(aid: int, name: str, price: int) -> None:
-    await db.ex("INSERT INTO sales(appointment_id, item_name, price, created_at) VALUES(?, ?, ?, ?)",
-                aid, name, price, dts(now()))
+@router.callback_query(ApptCB.filter(F.a == "ups"))
+async def upsell_open(cb: CallbackQuery, callback_data: ApptCB):
+    a = await _load(cb, callback_data.id)
+    if a:
+        text, kb = await render_upsell(a)
+        await safe_edit(cb.message, text, kb)
+        await cb.answer()
 
 
 @router.callback_query(SaleCB.filter(F.a == "add"))
-async def close_ups_btn(cb: CallbackQuery, callback_data: SaleCB, state: FSMContext):
+async def upsell_add(cb: CallbackQuery, callback_data: SaleCB):
     it = await db.q1("SELECT * FROM upsell_items WHERE id = ?", callback_data.it)
     if not it:
-        await cb.answer("Позицію не знайдено", show_alert=True)
+        await cb.answer("Товар не знайдено", show_alert=True)
         return
-    await _add_sale(callback_data.ap, it["name"], it["price"])
-    await _step(cb.message, state, callback_data.ap, Done.ups, edit=True)
+    await db.ex("INSERT INTO sales(appointment_id, item_name, price, created_at) VALUES(?, ?, ?, ?)",
+                callback_data.ap, it["name"], it["price"], dts(now()))
+    text, kb = await render_upsell(await appt(callback_data.ap))
+    await safe_edit(cb.message, text, kb)
     await cb.answer(f"+ {it['name']}")
 
 
-@router.message(Done.ups, F.text)
-async def close_ups_text(m: Message, state: FSMContext):
-    mt = re.fullmatch(r"\s*(.*?)[\s;,:–-]*(\d+)\s*(?:грн\.?)?\s*", m.text)
-    if not mt:
-        await m.answer("Напиши назву і суму, наприклад: <code>укладка 600</code>")
-        return
-    name = mt[1].strip()[:60] or "Допродаж"
-    await _add_sale((await state.get_data())["appt_id"], name[0].upper() + name[1:], int(mt[2]))
-    await _step(m, state, (await state.get_data())["appt_id"], Done.ups, edit=False)
-
-
 @router.callback_query(SaleCB.filter(F.a == "undo"))
-async def close_ups_undo(cb: CallbackQuery, callback_data: SaleCB, state: FSMContext):
+async def upsell_undo(cb: CallbackQuery, callback_data: SaleCB):
     last = await db.q1("SELECT id FROM sales WHERE appointment_id = ? ORDER BY id DESC LIMIT 1", callback_data.ap)
-    if last:
-        await db.ex("DELETE FROM sales WHERE id = ?", last["id"])
-    await _step(cb.message, state, callback_data.ap, Done.ups, edit=True)
+    if not last:
+        await cb.answer("Нічого прибирати")
+        return
+    await db.ex("DELETE FROM sales WHERE id = ?", last["id"])
+    text, kb = await render_upsell(await appt(callback_data.ap))
+    await safe_edit(cb.message, text, kb)
     await cb.answer("Прибрано")
 
 
-@router.callback_query(SaleCB.filter(F.a == "next"))
-async def close_ups_next(cb: CallbackQuery, callback_data: SaleCB, state: FSMContext):
-    await _step(cb.message, state, callback_data.ap, Done.tips, edit=True)
+@router.callback_query(SaleCB.filter(F.a == "cus"))
+async def upsell_custom(cb: CallbackQuery, callback_data: SaleCB, state: FSMContext):
+    await state.clear()
+    await state.set_state(Done.custom)
+    await state.update_data(appt_id=callback_data.ap)
+    await cb.message.answer("Введи назву і ціну, наприклад: <code>Пудра для обʼєму 320</code>")
     await cb.answer()
 
 
-async def _set_tips(msg: Message, state: FSMContext, aid: int, tips: int, edit: bool) -> None:
-    await db.ex("UPDATE appointments SET tips = ? WHERE id = ?", tips, aid)
-    await state.clear()
-    text, kb = await render_appt(await appt(aid))
-    text = "✅ <b>Візит закрито</b>\n\n" + text
-    if edit:
-        await safe_edit(msg, text, kb)
-    else:
-        await msg.answer(text, reply_markup=kb)
-
-
-@router.callback_query(SaleCB.filter(F.a == "tip"))
-async def close_tips_btn(cb: CallbackQuery, callback_data: SaleCB, state: FSMContext):
-    await _set_tips(cb.message, state, callback_data.ap, callback_data.it, edit=True)
-    await cb.answer("Збережено ✅")
-
-
-@router.message(Done.tips, F.text)
-async def close_tips_text(m: Message, state: FSMContext):
-    tips = to_int(m.text)
-    if tips is None:
-        await m.answer("Напиши суму чайових числом, наприклад 100, або натисни «Не було»")
+@router.message(Done.custom, F.text)
+async def upsell_custom_input(m: Message, state: FSMContext):
+    mt = re.fullmatch(r"\s*(.+?)[\s;,:–-]+(\d+)\s*(?:грн)?\s*", m.text)
+    if not mt:
+        await m.answer("Формат: <code>Назва 320</code>")
         return
-    await _set_tips(m, state, (await state.get_data())["appt_id"], tips, edit=False)
+    aid = (await state.get_data())["appt_id"]
+    await db.ex("INSERT INTO sales(appointment_id, item_name, price, created_at) VALUES(?, ?, ?, ?)",
+                aid, mt[1].strip(), int(mt[2]), dts(now()))
+    await state.clear()
+    text, kb = await render_upsell(await appt(aid))
+    await m.answer(text, reply_markup=kb)
+
+
+@router.callback_query(SaleCB.filter(F.a == "fin"))
+async def upsell_finish(cb: CallbackQuery, callback_data: SaleCB):
+    await _refresh(cb, callback_data.ap, prefix="✅ <b>Візит закрито</b>\n\n")
+    await cb.answer("Збережено")

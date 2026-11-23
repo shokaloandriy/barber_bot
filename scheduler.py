@@ -13,8 +13,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import db
 from cb import ApptCB
 from config import ADMIN_IDS
-from utils import (APPT_SQL, btn, day_hours, dts, due_clients, e, fdate, notify_admins, now, parse_time, rel_day,
-                   sdt, send_client, today)
+from utils import (APPT_SQL, btn, dts, due_clients, e, fdate, notify_admins, now, parse_time, rel_day, sdt,
+                   send_client, today)
 from views import kb_client_appt, render_day
 
 log = logging.getLogger(__name__)
@@ -84,9 +84,6 @@ async def morning_digest(bot: Bot) -> None:
     )
     if pending["n"]:
         text += f"\n\n⏳ Непідтверджених заявок: <b>{pending['n']}</b>"
-    if not any([await day_hours(today() + timedelta(days=i)) for i in range(1, 8)]):
-        text += "\n\n⚠️ На наступні 7 днів не відкрито жодного робочого дня — клієнти не можуть записатись. " \
-                "Відкрий дні в «🗓 Графік роботи»."
     await notify_admins(bot, "☀️ <b>Доброго ранку!</b>\n\n" + text, kb)
 
 

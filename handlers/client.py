@@ -7,11 +7,19 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import db
 from cb import MyCB, Reg
 from handlers import booking
-from keyboards import C_SKIP_PHONE, CLIENT_MENU, CONTACT_KB
+from keyboards import CLIENT_MENU, CONTACT_KB
+from middlewares import PHONE_PROMPT, ask_phone
 from utils import (EMOJI, STATUS_TXT, appt, appt_line, btn, card_short, client_by_tg, dts, e, ensure_client,
                    link_phone, money, norm_phone, notify_admins, now, safe_edit)
 
 router = Router()
+# Окремий роутер для введення номера — підключається ПЕРШИМ, щоб у цьому стані
+# ніякі кнопки меню не перехоплювали повідомлення (команди /start, /id, /cancel працюють)
+reg_router = Router()
+
+MENU_HINT = ("✂️ Записатися — оберіть послугу і вільний час\n"
+             "📋 Мої записи — перенести або скасувати\n"
+             "💈 Послуги і ціни\n📍 Контакти")
 
 
 # ---------- запис ----------
@@ -19,14 +27,7 @@ router = Router()
 async def book_entry(msg: Message, state: FSMContext, user) -> None:
     c = await ensure_client(user)
     if not c["phone"]:
-        await state.clear()
-        await state.set_state(Reg.phone)
-        await state.update_data(after="book")
-        await msg.answer(
-            "Щоб барбер міг звʼязатися з вами, поділіться номером телефону 👇\n"
-            "(або просто напишіть його повідомленням)",
-            reply_markup=CONTACT_KB,
-        )
+        await ask_phone(state, msg.answer, after="book")
         return
     last = await db.q1(
         "SELECT service_id FROM appointments WHERE client_id = ? AND status = 'done' ORDER BY start_at DESC LIMIT 1",
@@ -41,28 +42,41 @@ async def book_cb(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-@router.message(Reg.phone, F.text == C_SKIP_PHONE)
-async def phone_skip(m: Message, state: FSMContext):
-    await state.clear()
-    await m.answer("Добре. Без номера записатися не вийде — повертайтесь, коли буде зручно 🙂",
-                   reply_markup=CLIENT_MENU)
-
-
-@router.message(Reg.phone, F.contact | F.text)
-async def phone_input(m: Message, state: FSMContext):
-    raw = m.contact.phone_number if m.contact else m.text
+@reg_router.message(Reg.phone, ~F.text.startswith("/"))
+async def phone_input(m: Message, state: FSMContext, bot: Bot):
+    if not m.contact and not m.text:
+        await m.answer(PHONE_PROMPT, reply_markup=CONTACT_KB)
+        return
     if m.contact and m.contact.user_id and m.contact.user_id != m.from_user.id:
-        await m.answer("Будь ласка, надішліть саме свій номер 🙏")
+        await m.answer("Будь ласка, надішліть саме свій номер 🙏", reply_markup=CONTACT_KB)
         return
-    phone = norm_phone(raw)
+    phone = norm_phone(m.contact.phone_number if m.contact else m.text)
     if not phone:
-        await m.answer("Не схоже на номер телефону. Приклад: 0671234567")
+        await m.answer("Не схоже на номер телефону 🤔\nНатисніть «📱 Поділитися номером» або введіть, наприклад, "
+                       "<code>0671234567</code>", reply_markup=CONTACT_KB)
         return
-    c = await ensure_client(m.from_user)
-    await link_phone(c, phone)
+    taken = await db.q1("SELECT tg_id FROM clients WHERE phone = ? AND tg_id IS NOT NULL AND tg_id != ?",
+                        phone, m.from_user.id)
+    if taken:
+        await m.answer("Цей номер уже привʼязаний до іншого Telegram-акаунта. Введіть інший номер або "
+                       "звʼяжіться з барбером — контакти нижче.\n\n" + e(await db.get("info_text")),
+                       reply_markup=CONTACT_KB)
+        return
+
+    before = await ensure_client(m.from_user)
+    c = await link_phone(before, phone)
+    merged = c["id"] != before["id"]
     after = (await state.get_data()).get("after")
     await state.clear()
-    await m.answer("Дякую! 👍", reply_markup=CLIENT_MENU)
+
+    uname = f" @{e(m.from_user.username)}" if m.from_user.username else ""
+    if merged:
+        head = "🔗 <b>Клієнт з бази приєднався до бота</b>"
+    else:
+        head = "👋 <b>Новий клієнт у боті</b>"
+    await notify_admins(bot, f"{head}\n{e(c['name'])}{uname} · {c['phone']} · джерело: {e(c['source']) or 'бот'}")
+
+    await m.answer("Дякую, номер збережено 👍\n\n" + MENU_HINT, reply_markup=CLIENT_MENU)
     if after == "book":
         await book_entry(m, state, m.from_user)
 

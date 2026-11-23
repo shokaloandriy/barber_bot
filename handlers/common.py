@@ -4,12 +4,13 @@ import re
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 import db
 import keyboards as K
 from handlers import admin_book, admin_clients, admin_finance, admin_schedule, admin_settings, client
-from utils import IsAdmin, client_by_tg, e, ensure_client, is_admin, notify_admins, today
+from middlewares import ask_phone
+from utils import IsAdmin, e, ensure_client, is_admin, today
 
 router = Router()
 fallback = Router()
@@ -21,30 +22,26 @@ async def start(m: Message, command: CommandObject, state: FSMContext, bot: Bot)
     if is_admin(m.from_user.id):
         await m.answer(
             "💈 <b>Панель барбера</b>\n\n"
-            "📅 Сьогодні — записи на день, закриття візитів\n"
-            "🗓 Графік роботи — відкрий дні й години, коли працюєш (інші дні закриті для запису)\n"
+            "📅 Сьогодні — графік на день, закриття візитів\n"
+            "🗓 Тиждень — огляд завантаження\n"
             "➕ Запис — записати клієнта вручну\n"
             "👥 Клієнти — база, пошук, кому час на стрижку\n"
-            "💰 Фінанси — заробіток за тиждень і місяць\n"
-            "⚙️ Налаштування — послуги, ціни, контакти\n\n"
+            "💰 Фінанси — виручка і допродаж\n"
+            "⚙️ Налаштування — години, послуги, нагадування\n\n"
             "Подивитись бота очима клієнта: /client",
             reply_markup=K.ADMIN_MENU,
         )
         return
     src = command.args if command.args and re.fullmatch(r"[\w-]{1,32}", command.args) else None
-    is_new = not await client_by_tg(m.from_user.id)
-    await ensure_client(m.from_user, source=src)
+    c = await ensure_client(m.from_user, source=src)
     barber = e(await db.get("barber_name"))
-    await m.answer(
-        f"Привіт, {e(m.from_user.first_name)}! 👋\nЯ бот для запису до <b>{barber}</b>.\n\n"
-        "✂️ Записатися — оберіть послугу і вільний час\n"
-        "📋 Мої записи — перенести або скасувати\n"
-        "💈 Послуги і ціни\n📍 Контакти",
-        reply_markup=K.CLIENT_MENU,
-    )
-    if is_new:
-        uname = f" @{e(m.from_user.username)}" if m.from_user.username else ""
-        await notify_admins(bot, f"👋 Новий підписник: {e(m.from_user.full_name)}{uname} · джерело: {e(src) or 'бот'}")
+    hello = f"Привіт, {e(m.from_user.first_name)}! 👋\nЯ бот для запису до <b>{barber}</b>.\n\n"
+    if not c["phone"]:
+        # Барбер отримає сповіщення про нового клієнта вже з номером — у client.phone_input
+        await m.answer(hello.strip(), reply_markup=ReplyKeyboardRemove())
+        await ask_phone(state, m.answer)
+        return
+    await m.answer(hello + client.MENU_HINT, reply_markup=K.CLIENT_MENU)
 
 
 @router.message(Command("id"))
@@ -88,10 +85,10 @@ async def a_today(m: Message, state: FSMContext):
     await admin_schedule.send_day(m, today())
 
 
-@router.message(F.text == K.A_SCHED, IsAdmin())
-async def a_sched(m: Message, state: FSMContext):
+@router.message(F.text == K.A_WEEK, IsAdmin())
+async def a_week(m: Message, state: FSMContext):
     await state.clear()
-    await admin_schedule.send_sched(m)
+    await admin_schedule.send_week(m)
 
 
 @router.message(F.text == K.A_ADD, IsAdmin())

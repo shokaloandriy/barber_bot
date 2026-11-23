@@ -1,5 +1,7 @@
-"""Барбер: послуги, допродаж, контакти, нагадування, розсилка, посилання. Графік роботи — в admin_schedule."""
+"""Барбер: робочі години, винятки, послуги, товари допродажу, нагадування, розсилка, посилання."""
 import asyncio
+import re
+from datetime import date, timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
@@ -8,9 +10,10 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
-from cb import Bcast, ItCB, ItemEdit, SchedCB, SetCB, SetEdit, SvCB, SvcEdit
+from cb import Bcast, Hours, ItCB, ItemEdit, SetCB, SetEdit, SvCB, SvcEdit, WhCB
 from config import ADMIN_IDS
-from utils import IsAdmin, btn, d2k, e, money, parse_time, safe_edit, to_int, today
+from utils import (WD, WD_FULL, IsAdmin, btn, day_appts, e, fdate, money, parse_day, parse_range, parse_time,
+                   safe_edit, sdt, to_int, today)
 
 router = Router()
 router.message.filter(IsAdmin())
@@ -25,7 +28,7 @@ SETTINGS_META = {
     "morning_time": ("Час ранкового звіту про день", "time"),
     "haircut_time": ("Час розсилки нагадувань «пора на стрижку»", "time"),
     "evening_time": ("Час вечірньої перевірки незакритих візитів", "time"),
-    "info_text": ("Текст «📍 Контакти» для клієнтів (адреса, Telegram, Instagram)", "text"),
+    "info_text": ("Текст «📍 Контакти» для клієнтів (адреса, телефон, Instagram)", "text"),
 }
 
 
@@ -33,9 +36,9 @@ SETTINGS_META = {
 
 def _home_kb():
     kb = InlineKeyboardBuilder()
-    kb.row(btn("✂️ Послуги і ціни", SvCB(a="menu")), btn("🛍 Допродаж", ItCB(a="menu")))
-    kb.row(btn("📍 Контакти", SetCB(a="ed", k="info_text")), btn("🗓 Графік роботи", SchedCB(a="wk", day=d2k(today()))))
-    kb.row(btn("🔔 Нагадування", SetCB(a="menu", k="rem")), btn("📲 Запис клієнтів", SetCB(a="menu", k="bk")))
+    kb.row(btn("⏰ Робочі години", WhCB(a="menu")), btn("✂️ Послуги", SvCB(a="menu")))
+    kb.row(btn("🛍 Товари допродажу", ItCB(a="menu")), btn("🔔 Нагадування", SetCB(a="menu", k="rem")))
+    kb.row(btn("📲 Запис клієнтів", SetCB(a="menu", k="bk")), btn("📍 Контакти", SetCB(a="ed", k="info_text")))
     kb.row(btn("📣 Розсилка", "bc"), btn("🔗 Посилання", "lk"))
     return kb.as_markup()
 
@@ -163,6 +166,128 @@ async def edit_value(m: Message, state: FSMContext):
         await m.answer("✅ Збережено", reply_markup=_home_kb())
 
 
+# ---------- робочі години ----------
+
+async def _hours_screen():
+    rows = {r["weekday"]: r for r in await db.q("SELECT * FROM work_hours")}
+    lines = ["⏰ <b>Робочі години</b>", ""]
+    kb = InlineKeyboardBuilder()
+    for wd in range(7):
+        r = rows.get(wd)
+        hrs = f"{r['t_start']}–{r['t_end']}" if r and r["t_start"] else "вихідний"
+        lines.append(f"<b>{WD[wd]}</b> {hrs}")
+        kb.button(text=f"{WD[wd]} · {hrs}", callback_data=WhCB(a="d", v=str(wd)))
+    kb.adjust(2)
+    ovs = await db.q("SELECT * FROM day_overrides WHERE day >= ? ORDER BY day LIMIT 12", today().isoformat())
+    if ovs:
+        lines += ["", "<b>Винятки</b> (тапни, щоб видалити):"]
+        for o in ovs:
+            d = date.fromisoformat(o["day"])
+            txt = f"{o['t_start']}–{o['t_end']}" if o["t_start"] else "вихідний"
+            lines.append(f"{fdate(d)} — {txt}")
+            kb.row(btn(f"🗑 {fdate(d)} · {txt}", WhCB(a="del", v=o["day"])))
+    kb.row(btn("📆 Додати виняток (відпустка / інші години)", WhCB(a="ov")))
+    kb.row(_back())
+    return "\n".join(lines), kb.as_markup()
+
+
+@router.callback_query(WhCB.filter(F.a == "menu"))
+async def hours_menu(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    text, kb = await _hours_screen()
+    await safe_edit(cb.message, text, kb)
+    await cb.answer()
+
+
+@router.callback_query(WhCB.filter(F.a == "d"))
+async def hours_day(cb: CallbackQuery, callback_data: WhCB, state: FSMContext):
+    await state.clear()
+    await state.set_state(Hours.wd)
+    await state.update_data(wd=int(callback_data.v))
+    await cb.message.answer(f"<b>{WD_FULL[int(callback_data.v)]}</b>: введи години <code>10:00-19:00</code> "
+                            "або напиши <code>вихідний</code>")
+    await cb.answer()
+
+
+@router.message(Hours.wd, F.text)
+async def hours_day_input(m: Message, state: FSMContext):
+    wd = (await state.get_data())["wd"]
+    if m.text.strip().lower().startswith("вих"):
+        await db.ex("UPDATE work_hours SET t_start = NULL, t_end = NULL WHERE weekday = ?", wd)
+    else:
+        r = parse_range(m.text)
+        if not r:
+            await m.answer("Формат: <code>10:00-19:00</code> або <code>вихідний</code>")
+            return
+        await db.ex("UPDATE work_hours SET t_start = ?, t_end = ? WHERE weekday = ?",
+                    r[0].strftime("%H:%M"), r[1].strftime("%H:%M"), wd)
+    await state.clear()
+    text, kb = await _hours_screen()
+    await m.answer("✅ Збережено\n\n" + text, reply_markup=kb)
+
+
+@router.callback_query(WhCB.filter(F.a == "ov"))
+async def override_prompt(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(Hours.override)
+    await cb.message.answer(
+        "📆 Виняток на конкретну дату або період:\n\n"
+        "<code>31.10 вихідний</code>\n<code>31.10 12:00-16:00</code>\n<code>01.11-07.11 вихідний</code> — відпустка"
+    )
+    await cb.answer()
+
+
+@router.message(Hours.override, F.text)
+async def override_input(m: Message, state: FSMContext):
+    mt = re.fullmatch(r"\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)(?:\s*-\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?))?\s+(.+)",
+                      m.text)
+    if not mt:
+        await m.answer("Формат: <code>31.10 вихідний</code> або <code>31.10 12:00-16:00</code>")
+        return
+    d1 = parse_day(mt[1])
+    d2 = parse_day(mt[2]) if mt[2] else d1
+    if not d1 or not d2 or d2 < d1 or (d2 - d1).days > 60:
+        await m.answer("Не зрозумів дати.")
+        return
+    rest = mt[3].strip().lower()
+    if rest.startswith("вих"):
+        rng = None
+    else:
+        rng = parse_range(rest)
+        if not rng:
+            await m.answer("Години у форматі 12:00-16:00 або слово «вихідний».")
+            return
+    warnings = []
+    d = d1
+    while d <= d2:
+        await db.ex(
+            "INSERT INTO day_overrides(day, t_start, t_end) VALUES(?, ?, ?) "
+            "ON CONFLICT(day) DO UPDATE SET t_start = excluded.t_start, t_end = excluded.t_end",
+            d.isoformat(), rng[0].strftime("%H:%M") if rng else None, rng[1].strftime("%H:%M") if rng else None,
+        )
+        for a in await day_appts(d):
+            if a["status"] not in ("pending", "confirmed"):
+                continue
+            s, en = sdt(a["start_at"]), sdt(a["end_at"])
+            if not rng or s.time() < rng[0] or en.time() > rng[1]:
+                warnings.append(f"• {fdate(d)} {s:%H:%M} — {e(a['cname'])}")
+        d += timedelta(days=1)
+    await state.clear()
+    text, kb = await _hours_screen()
+    if warnings:
+        text = ("⚠️ <b>Ці записи випадають за нові години — перенеси або скасуй їх:</b>\n"
+                + "\n".join(warnings) + "\n\n" + text)
+    await m.answer("✅ Збережено\n\n" + text, reply_markup=kb)
+
+
+@router.callback_query(WhCB.filter(F.a == "del"))
+async def override_delete(cb: CallbackQuery, callback_data: WhCB):
+    await db.ex("DELETE FROM day_overrides WHERE day = ?", callback_data.v)
+    text, kb = await _hours_screen()
+    await safe_edit(cb.message, text, kb)
+    await cb.answer("Виняток видалено")
+
+
 # ---------- послуги ----------
 
 async def _svc_list():
@@ -267,15 +392,15 @@ async def svc_field(m: Message, state: FSMContext):
 # ---------- товари допродажу ----------
 
 async def _items_list():
-    rows = await db.q("SELECT * FROM upsell_items WHERE active = 1 ORDER BY id")
+    rows = await db.q("SELECT * FROM upsell_items WHERE active = 1 ORDER BY name")
     kb = InlineKeyboardBuilder()
     for it in rows:
         kb.button(text=f"{it['name']} · {it['price']} грн", callback_data=ItCB(a="v", id=it["id"]))
     kb.adjust(1)
     kb.row(btn("➕ Додати товар / послугу", ItCB(a="add")))
     kb.row(_back())
-    return ("🛍 <b>Допродаж</b>\nШвидкі кнопки на 2-му кроці закриття візиту. Будь-що інше барбер "
-            "просто пише текстом. Тапни позицію, щоб змінити ціну або прибрати."), kb.as_markup()
+    return ("🛍 <b>Товари допродажу</b>\nЦе кнопки, які зʼявляються після закриття візиту. "
+            "Тапни, щоб змінити ціну або прибрати."), kb.as_markup()
 
 
 @router.callback_query(ItCB.filter(F.a == "menu"))
@@ -291,7 +416,7 @@ async def item_view(cb: CallbackQuery, callback_data: ItCB):
     it = await db.q1("SELECT * FROM upsell_items WHERE id = ?", callback_data.id)
     kb = InlineKeyboardBuilder()
     kb.row(btn("💵 Ціна", ItCB(a="price", id=it["id"])), btn("🗑 Прибрати", ItCB(a="off", id=it["id"])))
-    kb.row(btn("⬅️ Допродаж", ItCB(a="menu")))
+    kb.row(btn("⬅️ Товари", ItCB(a="menu")))
     await safe_edit(cb.message, f"🛍 <b>{e(it['name'])}</b> · {money(it['price'])}", kb.as_markup())
     await cb.answer()
 

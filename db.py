@@ -66,7 +66,12 @@ CREATE TABLE IF NOT EXISTS sales(
 );
 CREATE INDEX IF NOT EXISTS ix_sales_appt ON sales(appointment_id);
 
--- робочі дні: барбер відкриває кожен день вручну; дня немає в таблиці = вихідний
+CREATE TABLE IF NOT EXISTS work_hours(
+    weekday INTEGER PRIMARY KEY,
+    t_start TEXT,
+    t_end   TEXT
+);
+
 CREATE TABLE IF NOT EXISTS day_overrides(
     day     TEXT PRIMARY KEY,
     t_start TEXT,
@@ -79,38 +84,37 @@ CREATE TABLE IF NOT EXISTS settings(
 );
 """
 
-INFO_TEXT = (
-    "💈 Барбер Андрій\n"
-    "📍 вул. Винниченка, 2 (2 поверх)\n"
-    "✈️ Telegram: @shkclll\n"
-    "📸 Instagram: https://instagram.com/sh.kcl"
-)
-
 DEFAULT_SETTINGS = {
-    "barber_name": "Андрій",
-    "default_remind_days": 28,
+    "barber_name": "Барбер",
+    "default_remind_days": 21,
     "booking_days": 14,
     "min_lead_min": 60,
-    "slot_step": 30,
+    "slot_step": 15,
     "remind_24": 1,
     "remind_2": 1,
     "morning_time": "08:30",
     "haircut_time": "11:00",
     "evening_time": "21:00",
-    "info_text": INFO_TEXT,
+    "info_text": "📍 Адреса: вкажи в налаштуваннях\n📞 Телефон: +380...\n📸 Instagram: @...",
 }
 
 DEFAULT_SERVICES = [
-    ("Стрижка", 45, 700),
-    ("Стрижка + борода", 60, 900),
-    ("Дитяча стрижка", 30, 600),
-    ("Стрижка під насадку", 30, 600),
+    ("Чоловіча стрижка", 45, 400),
+    ("Стрижка + борода", 75, 600),
+    ("Моделювання бороди", 30, 250),
+    ("Дитяча стрижка", 30, 300),
 ]
 
 DEFAULT_ITEMS = [
-    ("Укладка", 600),
-    ("Виривання воском", 50),
+    ("Віск / помада для укладки", 350),
+    ("Шампунь", 300),
+    ("Олія для бороди", 280),
 ]
+
+# 0 = понеділок ... 6 = неділя
+DEFAULT_HOURS = {0: ("10:00", "19:00"), 1: ("10:00", "19:00"), 2: ("10:00", "19:00"),
+                 3: ("10:00", "19:00"), 4: ("10:00", "19:00"), 5: ("10:00", "17:00"),
+                 6: (None, None)}
 
 
 async def init() -> None:
@@ -140,27 +144,9 @@ async def _ensure_column(table: str, column: str, decl: str) -> None:
 
 
 async def _migrate() -> None:
-    await _ensure_column("appointments", "tips", "INTEGER NOT NULL DEFAULT 0")
-    if not await q1("SELECT 1 FROM settings WHERE key = 'migr_v2'"):
-        # стара база (нова — порожня, її заповнить _seed): нові контакти, прайс, інтервал 4 тижні
-        if await q1("SELECT 1 FROM settings LIMIT 1"):
-            await _migrate_v2()
-        await _db.execute("INSERT INTO settings(key, value) VALUES('migr_v2', '1')")
-
-
-async def _migrate_v2() -> None:
-    for k in ("barber_name", "info_text", "default_remind_days"):
-        await _db.execute("UPDATE settings SET value = ? WHERE key = ?", (str(DEFAULT_SETTINGS[k]), k))
-    await _db.execute("UPDATE settings SET value = '30' WHERE key = 'slot_step' AND value = '15'")
-    # старі позиції не видаляємо — на них посилаються минулі візити
-    await _db.execute("UPDATE services SET active = 0")
-    for i, (name, dur, price) in enumerate(DEFAULT_SERVICES):
-        await _db.execute(
-            "INSERT INTO services(name, duration, price, sort) VALUES(?, ?, ?, ?)", (name, dur, price, i)
-        )
-    await _db.execute("UPDATE upsell_items SET active = 0")
-    for name, price in DEFAULT_ITEMS:
-        await _db.execute("INSERT INTO upsell_items(name, price) VALUES(?, ?)", (name, price))
+    # приклад на майбутнє:
+    # await _ensure_column("clients", "birthday", "TEXT")
+    pass
 
 
 async def _seed() -> None:
@@ -174,6 +160,9 @@ async def _seed() -> None:
     if not await q1("SELECT 1 FROM upsell_items LIMIT 1"):
         for name, price in DEFAULT_ITEMS:
             await _db.execute("INSERT INTO upsell_items(name, price) VALUES(?, ?)", (name, price))
+    if not await q1("SELECT 1 FROM work_hours LIMIT 1"):
+        for wd, (s, e) in DEFAULT_HOURS.items():
+            await _db.execute("INSERT INTO work_hours(weekday, t_start, t_end) VALUES(?, ?, ?)", (wd, s, e))
 
 
 async def q(sql: str, *args) -> list[aiosqlite.Row]:

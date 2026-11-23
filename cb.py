@@ -10,10 +10,8 @@ class DayCB(CallbackData, prefix="d"):
     day: str        # YYYYMMDD
 
 
-class SchedCB(CallbackData, prefix="sc"):
-    a: str          # wk = тиждень графіка, d = день, set = поставити години, cus = свої години, copy
-    day: str        # YYYYMMDD
-    v: str = ""     # HHMM-HHMM або off
+class WeekCB(CallbackData, prefix="w"):
+    day: str
 
 
 class ApptCB(CallbackData, prefix="a"):
@@ -39,7 +37,7 @@ class ClientCB(CallbackData, prefix="cl"):
 
 
 class SaleCB(CallbackData, prefix="s"):
-    a: str          # price (it = сума), add (it = товар), undo, next, tip (it = сума)
+    a: str          # add, cus, undo, fin
     ap: int
     it: int = 0
 
@@ -51,6 +49,11 @@ class FinCB(CallbackData, prefix="f"):
 class SetCB(CallbackData, prefix="st"):
     a: str          # menu, ed, tog
     k: str = ""
+
+
+class WhCB(CallbackData, prefix="wh"):
+    a: str          # menu, d, ov, del
+    v: str = ""
 
 
 class SvCB(CallbackData, prefix="sv"):
@@ -86,8 +89,7 @@ class ABook(StatesGroup):
 
 class Done(StatesGroup):
     price = State()
-    ups = State()
-    tips = State()
+    custom = State()
 
 
 class BlockSt(StatesGroup):
@@ -104,8 +106,9 @@ class CEdit(StatesGroup):
     phone = State()
 
 
-class SchedSt(StatesGroup):
-    custom = State()
+class Hours(StatesGroup):
+    wd = State()
+    override = State()
 
 
 class SvcEdit(StatesGroup):

@@ -2,7 +2,7 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 # --- кнопки барбера ---
 A_TODAY = "📅 Сьогодні"
-A_SCHED = "🗓 Графік роботи"
+A_WEEK = "🗓 Тиждень"
 A_ADD = "➕ Запис"
 A_CLIENTS = "👥 Клієнти"
 A_FIN = "💰 Фінанси"
@@ -13,11 +13,11 @@ C_BOOK = "✂️ Записатися"
 C_MY = "📋 Мої записи"
 C_PRICES = "💈 Послуги і ціни"
 C_CONTACTS = "📍 Контакти"
-C_SKIP_PHONE = "✖️ Не зараз"
+C_SHARE_PHONE = "📱 Поділитися номером"
 
 ADMIN_MENU = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=A_TODAY), KeyboardButton(text=A_SCHED)],
+        [KeyboardButton(text=A_TODAY), KeyboardButton(text=A_WEEK)],
         [KeyboardButton(text=A_ADD), KeyboardButton(text=A_CLIENTS)],
         [KeyboardButton(text=A_FIN), KeyboardButton(text=A_SETTINGS)],
     ],
@@ -32,11 +32,10 @@ CLIENT_MENU = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+# Без кнопки «пропустити»: поки клієнт не дасть номер, бот нічого іншого не робить
 CONTACT_KB = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📱 Поділитися номером", request_contact=True)],
-        [KeyboardButton(text=C_SKIP_PHONE)],
-    ],
+    keyboard=[[KeyboardButton(text=C_SHARE_PHONE, request_contact=True)]],
     resize_keyboard=True,
-    one_time_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="або введіть номер: 0671234567",
 )

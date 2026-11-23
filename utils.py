@@ -169,36 +169,13 @@ def to_int(s: str | None) -> int | None:
 
 # ---------- графік ----------
 
-def monday(d: date) -> date:
-    return d - timedelta(days=d.weekday())
-
-
 async def day_hours(d: date) -> tuple[time, time] | None:
-    """Години роботи на дату. День відкривається лише вручну барбером, інакше — вихідний."""
     row = await db.q1("SELECT t_start, t_end FROM day_overrides WHERE day = ?", d.isoformat())
+    if not row:
+        row = await db.q1("SELECT t_start, t_end FROM work_hours WHERE weekday = ?", d.weekday())
     if not row or not row["t_start"]:
         return None
     return parse_time(row["t_start"]), parse_time(row["t_end"])
-
-
-async def set_day_hours(d: date, rng: tuple[time, time] | None) -> list:
-    """Відкриває день з годинами rng або закриває (None). Повертає записи, що випадають за нові години."""
-    if rng:
-        await db.ex(
-            "INSERT INTO day_overrides(day, t_start, t_end) VALUES(?, ?, ?) "
-            "ON CONFLICT(day) DO UPDATE SET t_start = excluded.t_start, t_end = excluded.t_end",
-            d.isoformat(), rng[0].strftime("%H:%M"), rng[1].strftime("%H:%M"),
-        )
-    else:
-        await db.ex("DELETE FROM day_overrides WHERE day = ?", d.isoformat())
-    out = []
-    for a in await day_appts(d):
-        if a["status"] not in ("pending", "confirmed"):
-            continue
-        s, en = sdt(a["start_at"]), sdt(a["end_at"])
-        if not rng or s.time() < rng[0] or en.time() > rng[1]:
-            out.append(a)
-    return out
 
 
 async def busy_intervals(d: date, exclude_id: int | None = None) -> list[tuple[datetime, datetime]]:
@@ -217,15 +194,29 @@ async def free_slots(d: date, duration: int, exclude_id: int | None = None, lead
         return []
     step = max(5, await db.get_int("slot_step", 15))
     busy = await busy_intervals(d, exclude_id)
-    t = datetime.combine(d, hours[0])
+    start = datetime.combine(d, hours[0])
     end = datetime.combine(d, hours[1])
     earliest = now() + timedelta(minutes=lead_min)
     dur = timedelta(minutes=duration)
-    res = []
+
+    # Кандидати: звичайна сітка з кроком slot_step
+    cands = set()
+    t = start
     while t + dur <= end:
-        if t >= earliest and all(not (t < be and t + dur > bs) for bs, be in busy):
-            res.append(t.strftime("%H:%M"))
+        cands.add(t)
         t += timedelta(minutes=step)
+    # + «впритул»: одразу після кінця кожного запису/блоку і так, щоб закінчити рівно до початку наступного.
+    # Тому після стрижки 13:00–13:45 завжди є слот 13:45, навіть якщо крок 30 хв або тривалість не кратна кроку.
+    for bs, be in busy:
+        cands.add(be)
+        cands.add(bs - dur)
+
+    res = []
+    for t in sorted(cands):
+        if t < start or t + dur > end or t < earliest:
+            continue
+        if all(not (t < be and t + dur > bs) for bs, be in busy):
+            res.append(t.strftime("%H:%M"))
     return res
 
 
@@ -366,7 +357,7 @@ async def client_stats(cid: int) -> dict:
 
 async def due_clients():
     """Клієнти, яким за інтервалом уже час на стрижку і які ще не записані."""
-    default = await db.get_int("default_remind_days", 28)
+    default = await db.get_int("default_remind_days", 21)
     rows = await db.q(
         "SELECT c.*, MAX(a.start_at) AS last_visit FROM clients c "
         "JOIN appointments a ON a.client_id = c.id AND a.status = 'done' GROUP BY c.id"
